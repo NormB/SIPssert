@@ -63,7 +63,7 @@ class Testing:
 
     def emit(self, message, end='\n'):
         """emits a message to output"""
-        print(message, end=end)
+        print(message, end=end, flush=True)
     
     def emit_header(self, header):
         """emits testing header"""
