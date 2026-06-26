@@ -5,6 +5,115 @@ on:
   push:
   pull_request:
 
+# Previously this delegated to the tests repo's reusable workflow:
+#   uses: OpenSIPS/sipssert-opensips-tests/.github/workflows/run-tests.yml@main
+# That workflow checks out `${{ github.repository }}` as the tests dir, which
+# resolves to THIS framework repo when called from here -- so it looked for a
+# non-existent `tests/run.yml` and the matrix step died (red since Feb 2026).
+# Instead, run the conformance suite inline: install the framework from THIS
+# checkout (so a PR's framework code is exercised) and pull the scenarios from
+# the tests repo explicitly.
+
+env:
+  TESTS_REPO: OpenSIPS/sipssert-opensips-tests
+
 jobs:
-  opensips:
-    uses: OpenSIPS/sipssert-opensips-tests/.github/workflows/run-tests.yml@main
+  setup-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout SIPssert (this repo)
+        uses: actions/checkout@v6
+        with:
+          path: sipssert
+
+      - name: Checkout Tests repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.TESTS_REPO }}
+          path: tests
+
+      - name: Read and parse YAML file
+        id: set-matrix
+        run: |
+          MATRIX=$(python3 sipssert/.github/actions/Set_Matrix/read_matrix.py tests/run.yml)
+          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+  test:
+    needs: setup-matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout SIPssert (this repo)
+        uses: actions/checkout@v6
+        with:
+          path: sipssert
+
+      - name: Install SIPssert requirements
+        run: |
+          sudo apt update && sudo apt install -y tcpdump
+          sudo chmod +s "$(which tcpdump)"
+        shell: bash
+
+      - name: Install SIPssert framework (from this checkout)
+        run: |
+          cd sipssert
+          python3 setup.py install --user clean
+        shell: bash
+
+      - name: Checkout Tests repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.TESTS_REPO }}
+          path: tests
+
+      - name: Run Test
+        uses: ./sipssert/.github/actions/Run_Tests
+        with:
+          tests: ${{ matrix.tests }}
+
+  aggregate:
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Checkout Tests repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.TESTS_REPO }}
+          path: tests
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: junit-reports
+
+      - name: Aggregate JUnit Reports
+        run: |
+          pip install junitparser
+          python tests/.github/scripts/aggregate_junit_reports.py
+        env:
+          REPORTS_DIR: junit-reports
+          OUTPUT_FILE: junit-final-report.xml
+
+      - name: Upload JUnit XML
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-final-report
+          path: junit-final-report.xml
+
+      - name: Print tests summary
+        uses: mikepenz/action-junit-report@v6
+        id: summary
+        if: success() || failure()
+        with:
+          check_name: 'SIPssert tests report'
+          report_paths: junit-final-report.xml
+          annotate_only: true
+          fail_on_failure: true
+          detailed_summary: true
+          include_passed: true
